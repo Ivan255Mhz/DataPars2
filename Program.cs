@@ -1,24 +1,26 @@
 ﻿using DataPars.Data;
 using DataPars.Services;
-
 using Microsoft.EntityFrameworkCore;
 using System.Text;
 
 // Конфигурация
-string server = "GYRDYMOV-NEW\\DREAM";
+string server = "BELYAEV\\DREAM";
 string userId = "sa";
 string password = "Basepwd#0000";
-string database = "Metro_SKZ_Archive_Gorniy_ES01_30_01_2026";
-string baseOutputPath = @"C:\ADC_Exports";
+string database = "Metro_SKZ_Archive_Put_ES01";
+string BaseOutputPath = Path.Combine(
+    Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+    "ADC_Exports"
+);
 
-string connectionString = $"Server={server};Database={database};User Id={userId};Password={password};TrustServerCertificate=True;";
+string connectionString = $"Server={server};Database={database};Trusted_Connection=True;TrustServerCertificate=True;";
 
 var optionsBuilder = new DbContextOptionsBuilder<MetroSkzArchiveGorEs01Context>();
 optionsBuilder.UseSqlServer(connectionString);
 
 using var context = new MetroSkzArchiveGorEs01Context(optionsBuilder.Options);
 
-Console.WriteLine(" Загрузка конфигураций измерений...");
+Console.WriteLine($" Загрузка конфигураций измерений из базы: {database}");
 
 var setups = await context.MeasureSetups
     .Include(ms => ms.ParamGroup)
@@ -46,6 +48,13 @@ int totalFiles = 0;
 int totalRecords = 0;
 var exporter = new BinaryExporter(context);
 
+// Используем имя базы данных как название папки первого уровня
+string dbFolderName = SanitizeForFileName(database);
+string dbFolderPath = Path.Combine(BaseOutputPath, dbFolderName);
+
+Console.WriteLine($" Папка для экспорта: {dbFolderPath}");
+Console.WriteLine();
+
 foreach (var setup in setups)
 {
     try
@@ -70,7 +79,6 @@ foreach (var setup in setups)
         }
 
         var startTime = dataInfo.Min(x => x.Time);
-        var endTime = dataInfo.Max(x => x.Time);
         int count = dataInfo.Count;
         int dataLength = count * 4;
 
@@ -82,17 +90,23 @@ foreach (var setup in setups)
         string fileName = $"ESC{asset.Number}_Point{pointNumber}_{paramName}_{freqName}";
         string safeFileName = SanitizeForFileName(fileName);
 
-        // Создаем структуру папок: Станция → Тип эскалатора → Эскалатор
-        string stationFolder = Path.Combine(baseOutputPath, "Горный"); // Из конфигурации
-        string typeFolder = Path.Combine(stationFolder, device.Type?.TypeName ?? "Unknown");
-        string escalatorFolder = Path.Combine(typeFolder, $"Эскалатор №{asset.Number}");
+        // Создаем структуру папок: База данных → Тип эскалатора → Эскалатор
+        string typeFolder = Path.Combine(dbFolderPath, device.Type?.TypeName ?? "Unknown");
+        string escalatorFolder = Path.Combine(typeFolder, $"Эскалатор_№{asset.Number}");
 
         Directory.CreateDirectory(escalatorFolder);
 
         string binPath = Path.Combine(escalatorFolder, safeFileName + ".bin");
         string tsxmlPath = Path.Combine(escalatorFolder, safeFileName + ".tsxml");
 
-        Console.Write($"📤 {fileName}... ");
+        // Проверяем, не существует ли уже файл
+        if (File.Exists(binPath) || File.Exists(tsxmlPath))
+        {
+            Console.WriteLine($" Файл уже существует: {fileName}, пропускаем...");
+            continue;
+        }
+
+        Console.Write($" {fileName}... ");
 
         // Экспортируем бинарные данные
         await exporter.ExportMeasureSetupAsync(setup.Id, binPath);
@@ -112,7 +126,7 @@ foreach (var setup in setups)
             $"Device_{device.Number}_Ch{channelNum}",  // ChannelName
             units,
             comment,
-            frequency: 2,  // По умолчанию 2 Гц
+            frequency: 2046,  
             durationSeconds: count / 2
         );
 
@@ -127,7 +141,9 @@ foreach (var setup in setups)
 }
 
 Console.WriteLine();
-Console.WriteLine(" ЭКСПОРТ ЗАВЕРШЕН");
+Console.WriteLine("   ЭКСПОРТ ЗАВЕРШЕН");
+Console.WriteLine($"   База данных: {database}");
+Console.WriteLine($"   Папка: {dbFolderPath}");
 Console.WriteLine($"   Файлов создано: {totalFiles}");
 Console.WriteLine($"   Всего записей: {totalRecords:N0}");
 
@@ -150,9 +166,40 @@ static string SanitizeForFileName(string name)
 static string ConvertToHtmlMnemonic(string unit)
 {
     if (string.IsNullOrEmpty(unit)) return "ед";
+
+    
+    string unitLower = unit.ToLower();
+
+    // Тахометр (обороты в минуту)
+    if (unitLower.Contains("гц") || unitLower.Contains("гц") ||
+        unitLower.Contains("об") || unitLower.Contains("оборотов"))
+    {
+        return "об/мин";
+    }
+
+    // Частота (герцы)
+    if (unitLower.Contains("гц") || unitLower.Contains("hz"))
+    {
+        return "Гц";
+    }
+
+    // Вибрация (м/с²)
+    if (unitLower.Contains("м/с") || unitLower.Contains("м/с2") ||
+        unitLower.Contains("м/с²") || unitLower.Contains("m/s"))
+    {
+        return "м/с&#178;";  // HTML мнемоника для квадрата
+    }
+
+    // Температура
+    if (unitLower.Contains("°c") || unitLower.Contains("°с") ||
+        unitLower.Contains("c°") || unitLower.Contains("с°"))
+    {
+        return "&#176;C";  
+    }
+
+    // Если ничего не подошло, возвращаем оригинал с заменой спецсимволов
     return unit
         .Replace("²", "&#178;")
         .Replace("2", "&#178;")
-        .Replace("°", "&#176;")
-        .Replace("м/с", "м/с");
+        .Replace("°", "&#176;");
 }
