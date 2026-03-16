@@ -63,6 +63,7 @@ public static class TsxmlGenerator
   </Channels>
 </MainRoot>";
 
+
         // Сохраняем файл с правильной кодировкой
         File.WriteAllText(path, xml, Encoding.GetEncoding("windows-1251"));
     }
