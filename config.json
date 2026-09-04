@@ -1,0 +1,9 @@
+{
+  "Server": "GYRDYMOV-NEW\\DREAM",
+  "UserId": "sa",
+  "Password": "Basepwd#0000",
+  "OutputPath": "C:\\Users\\БеляевИА\\Desktop\\ADC_Exports",
+  "DbPattern": "Metro_SKZ_Archive_%",
+  "DbParallelism": 2,
+  "SetupParallelism": 4
+}

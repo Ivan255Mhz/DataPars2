@@ -1,21 +1,12 @@
-﻿namespace DataPars.Services;
+namespace DataPars.Services;
 
 using System.Text;
 
 public static class TsxmlGenerator
 {
     /// <summary>
-    /// Создает TSXML файл в формате, соответствующем эталону
+    /// Создаёт TSXML для одного канала.
     /// </summary>
-    /// <param name="path">Полный путь для сохранения файла</param>
-    /// <param name="dataFileName">Имя бинарного файла (с расширением .bin)</param>
-    /// <param name="startTime">Время начала записи</param>
-    /// <param name="dataLength">Длина данных в байтах</param>
-    /// <param name="channelName">Имя канала</param>
-    /// <param name="units">Единицы измерения (с HTML-мнемоникой)</param>
-    /// <param name="comment">Комментарий (с HTML-мнемоникой для русских букв)</param>
-    /// <param name="frequency">Частота дискретизации в Гц</param>
-    /// <param name="durationSeconds">Длительность в секундах (если не указана, вычисляется из dataLength/frequency)</param>
     public static void Create(
         string path,
         string dataFileName,
@@ -25,13 +16,13 @@ public static class TsxmlGenerator
         string units,
         string comment,
         int frequency = 2046,
-        int? durationSeconds = null)
+        int? durationSeconds = null,
+        string sensorScale = "5148,02001953125",
+        string sensorSensitivity = "10,1940002441406")
     {
-        // Вычисляем длительность, если не указана
         int toSeconds = durationSeconds ?? (dataLength / 4) / frequency;
         if ((dataLength / 4) % frequency != 0) toSeconds++;
 
-        // Формируем XML в точности как в эталоне
         var xml = $@"<?xml version=""1.0"" encoding=""windows-1251"" standalone=""no""?>
 <MainRoot>
   <Culture>ru-ru</Culture>
@@ -56,49 +47,54 @@ public static class TsxmlGenerator
       <RealDataType>Single</RealDataType>
       <DataType>Single</DataType>
       <Scale>mV</Scale>
-      <SensorScale>5148,02001953125</SensorScale>
-      <SensorSensitivity>10,1940002441406</SensorSensitivity>
+      <SensorScale>{sensorScale}</SensorScale>
+      <SensorSensitivity>{sensorSensitivity}</SensorSensitivity>
       <GainFactor>1</GainFactor>
     </Channel>
   </Channels>
 </MainRoot>";
 
-
-        // Сохраняем файл с правильной кодировкой
-        File.WriteAllText(path, xml, Encoding.GetEncoding("windows-1251"));
+        // Явно кодируем строку через windows-1251 байты
+        var enc = Encoding.GetEncoding("windows-1251");
+        var bytes = enc.GetBytes(xml);
+        File.WriteAllBytes(path, bytes);
     }
 
     /// <summary>
-    /// Создает TSXML файл для нескольких каналов
+    /// Создаёт общий TSXML для нескольких каналов эскалатора.
+    /// Каждый канал ссылается на свой отдельный .bin файл.
     /// </summary>
     public static void CreateMultiChannel(
         string path,
-        string baseDataFileName,
-        DateTime startTime,
+        DateTime overallStartTime,
         List<ChannelInfo> channels,
-        int frequency = 2)
+        int frequency = 2046)
     {
-        // Находим максимальную длительность
-        int maxDuration = 0;
-        foreach (var ch in channels)
+        // Длительность = максимум по всем каналам
+        int maxDuration = channels.Max(ch =>
         {
             int sec = (ch.DataLength / 4) / frequency;
             if ((ch.DataLength / 4) % frequency != 0) sec++;
-            if (sec > maxDuration) maxDuration = sec;
-        }
+            return sec;
+        });
 
-        // Формируем XML для нескольких каналов
-        var sw = new StringWriter();
-        var settings = new System.Xml.XmlWriterSettings { Indent = true, IndentChars = "  " };
+        var encoding = Encoding.GetEncoding("windows-1251");
+        var settings = new System.Xml.XmlWriterSettings
+        {
+            Indent = true,
+            IndentChars = "  ",
+            Encoding = encoding
+        };
 
-        using (var writer = System.Xml.XmlWriter.Create(sw, settings))
+        using var fileStream = new FileStream(path, FileMode.Create, FileAccess.Write);
+        using (var writer = System.Xml.XmlWriter.Create(fileStream, settings))
         {
             writer.WriteStartDocument();
             writer.WriteStartElement("MainRoot");
 
             writer.WriteElementString("Culture", "ru-ru");
             writer.WriteElementString("DateTime", DateTime.Now.ToString("dd.MM.yyyy HH:mm:ss"));
-            writer.WriteElementString("StartDateTime", startTime.ToString("dd.MM.yyyy HH:mm:ss"));
+            writer.WriteElementString("StartDateTime", overallStartTime.ToString("dd.MM.yyyy HH:mm:ss"));
 
             writer.WriteStartElement("From");
             writer.WriteAttributeString("Units", "s");
@@ -113,7 +109,6 @@ public static class TsxmlGenerator
             writer.WriteElementString("ChannelsQuantity", channels.Count.ToString());
             writer.WriteElementString("TachoChannelsQuantity", "0");
             writer.WriteElementString("FrequencyPerChannel", frequency.ToString());
-            writer.WriteElementString("DataFileName", $".\\{baseDataFileName}");
 
             writer.WriteStartElement("Channels");
 
@@ -139,7 +134,7 @@ public static class TsxmlGenerator
                 writer.WriteElementString("SensorSensitivity", "10,1940002441406");
                 writer.WriteElementString("GainFactor", "1");
 
-                writer.WriteEndElement();
+                writer.WriteEndElement(); // Channel
             }
 
             writer.WriteEndElement(); // Channels
@@ -147,18 +142,74 @@ public static class TsxmlGenerator
             writer.WriteEndDocument();
         }
 
-        File.WriteAllText(path, sw.ToString(), Encoding.GetEncoding("windows-1251"));
+        // файл уже записан через fileStream
+    }
+
+
+    /// <summary>
+    /// Создаёт TSXML для канала режима работы (формат Byte/Count — как тахометр).
+    /// </summary>
+    /// <param name="count">Количество записей (не байт)</param>
+    public static void CreateModeChannel(
+        string path,
+        string dataFileName,
+        DateTime startTime,
+        int count,
+        string channelName,
+        int frequency = 2046)
+    {
+        // Single формат: float, 4 байта на запись, значения 0/1/2/3
+        // SensorScale=1, SensorSensitivity=1 — без масштабирования
+        int dataLength = count * 4;
+        int toSeconds = count / frequency;
+        if (count % frequency != 0) toSeconds++;
+
+        var xml = $@"<?xml version=""1.0"" encoding=""windows-1251"" standalone=""no""?>
+<MainRoot>
+  <Culture>ru-ru</Culture>
+  <DateTime>{DateTime.Now:dd.MM.yyyy HH:mm:ss}</DateTime>
+  <StartDateTime>{startTime:dd.MM.yyyy HH:mm:ss}</StartDateTime>
+  <From Units=""s"">0</From>
+  <To Units=""s"">{toSeconds}</To>
+  <ChannelsQuantity>1</ChannelsQuantity>
+  <TachoChannelsQuantity>0</TachoChannelsQuantity>
+  <FrequencyPerChannel>{frequency}</FrequencyPerChannel>
+  <DataFileName>.\{dataFileName}</DataFileName>
+  <Channels>
+    <Channel Index=""0"">
+      <ChannelName>{channelName}</ChannelName>
+      <DataFileName>.\{dataFileName}</DataFileName>
+      <Comment>&#x0420;&#x0435;&#x0436;&#x0438;&#x043C; &#x0440;&#x0430;&#x0431;&#x043E;&#x0442;&#x044B;: 0=&#x041D;&#x0435;&#x0442; &#x0434;&#x0430;&#x043D;&#x043D;&#x044B;&#x0445; 1=&#x0412;&#x044B;&#x043A;&#x043B;&#x044E;&#x0447;&#x0435;&#x043D; 2=&#x041F;&#x043E;&#x0434;&#x044A;&#x0451;&#x043C; 3=&#x0421;&#x043F;&#x0443;&#x0441;&#x043A;</Comment>
+      <ChannelNumber>1</ChannelNumber>
+      <ChannelFrequency>{frequency}</ChannelFrequency>
+      <DataOffset>0</DataOffset>
+      <DataLength>{dataLength}</DataLength>
+      <Units>&#x0420;&#x0435;&#x0436;&#x0438;&#x043C;</Units>
+      <RealDataType>Single</RealDataType>
+      <DataType>Single</DataType>
+      <Scale>mV</Scale>
+      <SensorScale>1</SensorScale>
+      <SensorSensitivity>1</SensorSensitivity>
+      <GainFactor>1</GainFactor>
+    </Channel>
+  </Channels>
+</MainRoot>";
+
+        var enc2 = Encoding.GetEncoding("windows-1251");
+        var bytes2 = enc2.GetBytes(xml);
+        File.WriteAllBytes(path, bytes2);
     }
 }
 
 /// <summary>
-/// Информация о канале для многоканального экспорта
+/// Описание одного канала для многоканального tsxml.
 /// </summary>
 public class ChannelInfo
 {
-    public string ChannelName { get; set; }
-    public string DataFileName { get; set; }
-    public string Comment { get; set; }
-    public int DataLength { get; set; }
-    public string Units { get; set; }
+    public string   ChannelName  { get; set; } = "";
+    public string   DataFileName { get; set; } = "";  // только имя файла, без пути
+    public string   Comment      { get; set; } = "";
+    public int      DataLength   { get; set; }
+    public string   Units        { get; set; } = "";
+    public DateTime StartTime    { get; set; }        // для вычисления общего MIN
 }
